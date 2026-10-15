@@ -63,6 +63,7 @@ mkdir -p "$OUT_DIR"
 cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-service"
 cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-V1-service"
 cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-V11-service"
+cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-V12-service"
 cp -f "${SCRIPT_DIR}/vendor.oplus.hardware.charger-service.rc" "${OUT_DIR}/vendor.oplus.hardware.charger-service.rc"
 
 # Create ready-to-deploy archive
@@ -70,6 +71,7 @@ tar -czf "${OUT_DIR}/charger_package.tar.gz" -C "${OUT_DIR}" \
     vendor.oplus.hardware.charger-service \
     vendor.oplus.hardware.charger-V1-service \
     vendor.oplus.hardware.charger-V11-service \
+    vendor.oplus.hardware.charger-V12-service \
     vendor.oplus.hardware.charger-service.rc
 
 echo ""
