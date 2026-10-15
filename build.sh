@@ -1,72 +1,78 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${SCRIPT_DIR}/out"
 
-if [ "$1" = "clean" ]; then
+if [ "${1:-}" = "clean" ]; then
     echo "Cleaning build outputs..."
-    rm -rf "${OUT_DIR}" "${SCRIPT_DIR}/vendor.oplus.hardware.charger-service"
+    rm -rf "${OUT_DIR}" "${SCRIPT_DIR}/target"
     echo "Clean complete."
     exit 0
 fi
 
-# Clean legacy output in root folder if present
-rm -f "${SCRIPT_DIR}/vendor.oplus.hardware.charger-service"
+PROFILE="${1:-release}"
+case "$PROFILE" in
+    debug|release) ;;
+    *)
+        echo "error: profile must be 'debug' or 'release'" >&2
+        exit 2
+        ;;
+esac
 
-mkdir -p "${OUT_DIR}"
-
-NDK_PATH="${ANDROID_NDK_ROOT:-/home/android-ndk-r26b}"
-TOOLCHAIN="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64"
-CC="${TOOLCHAIN}/bin/aarch64-linux-android34-clang"
-STRIP="${TOOLCHAIN}/bin/llvm-strip"
-READELF="${TOOLCHAIN}/bin/llvm-readelf"
-
-SOURCE_FILE="${SCRIPT_DIR}/charger_service.cpp"
-RC_FILE="${SCRIPT_DIR}/vendor.oplus.hardware.charger-service.rc"
-OUTPUT_BINARY="${OUT_DIR}/vendor.oplus.hardware.charger-service"
-OUTPUT_RC="${OUT_DIR}/vendor.oplus.hardware.charger-service.rc"
-LIBS_DIR="${SCRIPT_DIR}/device_libs"
-
-echo "=== Building vendor.oplus.hardware.charger-service (Transsion Edition) ==="
-
-if [ ! -f "${CC}" ]; then
-    echo "Error: Clang compiler not found at ${CC}"
+ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-/home/rapli/android-ndk-r26b}}"
+if [ ! -d "$ANDROID_NDK_HOME" ]; then
+    echo "error: Android NDK not found at $ANDROID_NDK_HOME" >&2
     exit 1
 fi
 
-if [ ! -d "${LIBS_DIR}" ]; then
-    echo "Error: device_libs directory not found at ${LIBS_DIR}"
+NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+if [ ! -x "$NDK_BIN/aarch64-linux-android26-clang" ]; then
+    echo "error: Android NDK clang toolchain not found under $NDK_BIN" >&2
     exit 1
 fi
 
-echo "[1/4] Compiling C source for aarch64 Android 14+ (API 34)..."
-"${CC}" -O2 -Wall -Wextra \
-    -Wl,-z,max-page-size=16384 \
-    "${SOURCE_FILE}" \
-    -L"${LIBS_DIR}" \
-    -llog -lbinder_ndk \
-    -o "${OUTPUT_BINARY}"
+export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang"
+export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android26-clang++"
+export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
 
-echo "[2/4] Stripping binary symbols..."
-"${STRIP}" --strip-unneeded "${OUTPUT_BINARY}"
-chmod 755 "${OUTPUT_BINARY}"
+CARGO_BIN="${CARGO:-cargo}"
+if [ -x "$HOME/.cargo/bin/cargo" ]; then
+    CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
 
-echo "[3/4] Copying init configuration (.rc) and V1 alias..."
-cp -f "${RC_FILE}" "${OUTPUT_RC}"
-chmod 644 "${OUTPUT_RC}"
-cp -f "${OUTPUT_BINARY}" "${OUT_DIR}/vendor.oplus.hardware.charger-V1-service"
-chmod 755 "${OUT_DIR}/vendor.oplus.hardware.charger-V1-service"
+echo "=== Building OPlus Charger Bridge for Transsion ($PROFILE, Rust aarch64) ==="
 
-echo "[4/4] Verifying binary dependencies..."
-"${READELF}" -d "${OUTPUT_BINARY}" | grep -E "NEEDED|SONAME|FLAGS"
+cd "$SCRIPT_DIR"
 
+if [ "$PROFILE" = "release" ]; then
+    "$CARGO_BIN" build --target aarch64-linux-android --release
+    BIN="target/aarch64-linux-android/release/vendor-oplus-hardware-charger-service"
+else
+    "$CARGO_BIN" build --target aarch64-linux-android
+    BIN="target/aarch64-linux-android/debug/vendor-oplus-hardware-charger-service"
+fi
+
+if [ "$PROFILE" = "release" ]; then
+    echo "==> Stripping binary..."
+    "$NDK_BIN/llvm-strip" "$BIN"
+fi
+
+mkdir -p "$OUT_DIR"
+cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-service"
+cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-V1-service"
+cp -f "$BIN" "$OUT_DIR/vendor.oplus.hardware.charger-V11-service"
+cp -f "${SCRIPT_DIR}/vendor.oplus.hardware.charger-service.rc" "${OUT_DIR}/vendor.oplus.hardware.charger-service.rc"
+
+# Create ready-to-deploy archive
 tar -czf "${OUT_DIR}/charger_package.tar.gz" -C "${OUT_DIR}" \
     vendor.oplus.hardware.charger-service \
     vendor.oplus.hardware.charger-V1-service \
+    vendor.oplus.hardware.charger-V11-service \
     vendor.oplus.hardware.charger-service.rc
 
 echo ""
-echo "=== Build Complete: Output files located in ${OUT_DIR} ==="
+echo "=== Build Succeeded! Outputs in ${OUT_DIR} ==="
 ls -lh "${OUT_DIR}"
-file "${OUTPUT_BINARY}"
+file "${OUT_DIR}/vendor.oplus.hardware.charger-service"
