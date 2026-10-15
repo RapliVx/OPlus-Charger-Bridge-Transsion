@@ -140,6 +140,10 @@ interface ICharger {
     String getChgConfig(int flag, in String extra, int callerName);
     int setUsbEyeDiagram(int model, in String eyeDiagram, boolean isDefaultEyeDiagram);
     String getUsbCurrentEyeDiagram(int model);
+    String queryRgcpHboostInfo();
+    String setCV(int cv1, int cv2);
+    String getDeepSleepClustersSleepWake();
+    String getPowerbankInfo(in String data, int type);
 
     int getInterfaceVersion();
     String getInterfaceHash();
