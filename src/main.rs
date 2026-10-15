@@ -159,7 +159,6 @@ impl ICharger for ChargerService {
         getPsyWirelessTxVersion;
         getReserveSocDebug;
         getWirelessDeviated;
-        getWirelessTXEnable;
         queryWlsPencilInfo;
         getChgOlcConfig;
         testKitGetFeatureList;
@@ -167,11 +166,32 @@ impl ICharger for ChargerService {
         getUsbCurrentEyeDiagram(model: i32);
         getQuickModeGain;
         getUisohDebugParameterInfo;
+        queryRgcpHboostInfo;
+        getPowerbankInfo(data: &str, typ: i32);
+        setCV(cv1: i32, cv2: i32);
+    }
+
+    fn r#getWirelessTXEnable(&self) -> BinderResult<String> {
+        Ok("disable".to_string())
+    }
+
+    fn r#getDeepSleepClustersSleepWake(&self) -> BinderResult<String> {
+        Ok("0".to_string())
     }
 
     fn r#getAcType(&self) -> BinderResult<i32> {
         let st = TranssionState::resolve();
-        Ok(if st.online { 1 } else { 0 })
+        if !st.online {
+            Ok(0)
+        } else if st.is_pc_usb {
+            Ok(1) // USB (SDP)
+        } else if st.is_supervooc {
+            Ok(4) // SuperVOOC
+        } else if st.is_fast {
+            Ok(3) // VOOC / Fast
+        } else {
+            Ok(2) // Normal AC
+        }
     }
 
     fn r#getBattAuthenticate(&self) -> BinderResult<i32> {
@@ -213,12 +233,12 @@ impl ICharger for ChargerService {
 
     fn r#getPsyAcOnline(&self) -> BinderResult<i32> {
         let st = TranssionState::resolve();
-        Ok(if st.online { 1 } else { 0 })
+        Ok(if st.online && !st.is_pc_usb { 1 } else { 0 })
     }
 
     fn r#getPsyUsbOnline(&self) -> BinderResult<i32> {
         let st = TranssionState::resolve();
-        Ok(if st.online { 1 } else { 0 })
+        Ok(if st.online && st.is_pc_usb { 1 } else { 0 })
     }
 
     fn r#getPsyBatteryCC(&self) -> BinderResult<i32> {
@@ -343,32 +363,30 @@ impl ICharger for ChargerService {
     ) -> BinderResult<String> {
         let st = TranssionState::resolve();
         let res = match flag {
-            0 => st.tech.to_string(), // mChargerTechnology: 3 = SuperVOOC, 2 = VOOC, 0 = Normal
-            1 | 2 | 3 => {
+            0 => (if st.online { st.ui_icon } else { 0 }).to_string(), // GET_UI_CHG_ICON_TYPE (3 = SuperVOOC, 2 = VOOC, 1 = Normal, 0 = None)
+            1 | 2 | 3 | 4 => {
                 if st.is_fast {
                     st.wattage.to_string()
                 } else {
                     "0".to_string()
                 }
             }
-            4 => {
-                // mCPAChargeWattage
-                if st.is_fast {
-                    st.wattage.to_string()
-                } else {
-                    "0".to_string()
-                }
-            }
-            5 => st.limit_soc.to_string(),
-            6 => (if st.sup_speed { 1 } else { 0 }).to_string(),
-            14 => (if st.limit_soc < 100 { 1 } else { 0 }).to_string(),
-            20 => st.cycle_count.to_string(),
-            21 => "0".to_string(),
-            23 => "mtk".to_string(),
-            24 | 25 => (if st.bypass_active { 1 } else { 0 }).to_string(),
-            30 => st.build_update_json(),
+            5 => st.limit_soc.to_string(), // SET_CHG_UP_LIMIT_VALUE
+            6 => (if st.sup_speed { 1 } else { 0 }).to_string(), // IS_SUPPORT_SINGLE_HYPER_SPEED
+            8 => "0".to_string(), // IS_SUPPORT_ECO_DESIGN
+            14 => (if st.limit_soc < 100 { 1 } else { 0 }).to_string(), // SET_CHG_UP_LIMIT_STATE
+            17 => "0".to_string(), // GET_DEEP_DISCHG_COUNTS_VALUE
+            20 => st.cycle_count.to_string(), // GET_BATT_UI_CYCLE_COUNT
+            21 => "0".to_string(), // Silicon battery
+            23 => "mtk".to_string(), // Gauge type
+            24 | 25 => (if st.bypass_active { 1 } else { 0 }).to_string(), // GET_CHG_BYPASS_STATUS
+            26 => "0".to_string(), // GET_RX_DISABLE_STATUS
+            29 => st.build_query_info(), // GET_CHARGER_INFO
+            30 => st.build_update_json(), // GET_CHARGER_INFO_UPDATE
+            35 => "0".to_string(), // GET_BDD_LEAK_CURR
+            44 | 45 | 46 | 47 => "0".to_string(), // Powerbank status / info
             58 => st.soh.to_string(),
-            _ => "-1".to_string(),
+            _ => "0".to_string(),
         };
         Ok(res)
     }
@@ -379,25 +397,37 @@ impl ICharger for ChargerService {
         extra: &str,
         _caller_name: i32,
     ) -> BinderResult<i32> {
+        let trimmed = extra.trim();
         match flag {
             5 => {
-                if let Ok(limit) = extra.trim().parse::<i32>() {
+                // Set charge limit target SOC (e.g. 80)
+                if let Ok(limit) = trimmed.parse::<i32>() {
                     TranssionState::set_charge_limit(limit);
                 }
                 Ok(0)
             }
             14 => {
-                if extra.trim() == "0" {
-                    TranssionState::set_charge_limit(100);
-                }
+                // Toggle charge limit (80% battery protect switch)
+                let enable = trimmed.contains("switch=1")
+                    || trimmed == "1"
+                    || trimmed.contains("true")
+                    || trimmed.contains("enable")
+                    || trimmed.contains("on");
+                let target = if enable { 80 } else { 100 };
+                TranssionState::set_charge_limit(target);
                 Ok(0)
             }
-            25 => {
-                let enabled = extra.contains("switch=1") || extra.trim() == "1";
-                TranssionState::set_bypass_charging(enabled);
+            24 | 25 => {
+                // Bypass charging toggle
+                let enable = trimmed.contains("switch=1")
+                    || trimmed == "1"
+                    || trimmed.contains("true")
+                    || trimmed.contains("enable")
+                    || trimmed.contains("on");
+                TranssionState::set_bypass_charging(enable);
                 Ok(0)
             }
-            _ => Ok(-1),
+            _ => Ok(0),
         }
     }
 

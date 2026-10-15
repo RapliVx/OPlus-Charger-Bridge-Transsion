@@ -17,6 +17,7 @@ pub const NODE_BATTERY_CHARGE_COUNTER: &str = "/sys/class/power_supply/battery/c
 pub const NODE_BATTERY_CYCLE_COUNT: &str = "/sys/class/power_supply/battery/cycle_count";
 
 pub const NODE_CHARGER_ONLINE: &str = "/sys/class/power_supply/charger/online";
+pub const NODE_CHARGER_USB_TYPE: &str = "/sys/class/power_supply/charger/usb_type";
 
 pub const NODE_TRAN_ADAPTER_CAPACITY: &str = "/sys/devices/platform/charger/adapter_capacity";
 pub const NODE_TRAN_TA_POWER: &str = "/sys/class/power_supply/tran-auto-test/ta_power";
@@ -93,12 +94,13 @@ pub fn get_system_property(_key: &str) -> Option<String> {
 #[derive(Debug, Clone, Default)]
 pub struct TranssionState {
     pub online: bool,
+    pub is_pc_usb: bool,
     pub wattage: i32,
     pub is_fast: bool,
     pub is_supervooc: bool,
     pub tech: i32,      // 0 = Normal, 1 = QC/PD, 2 = VOOC, 3 = SuperVOOC
     pub fast_type: i32, // 0 = Normal, 1 = VOOC, 2 = SuperVOOC 65W+
-    pub ui_icon: i32,   // 0 = none, 1 = normal/fast bolt, 2 = SuperVOOC animation
+    pub ui_icon: i32,   // 0 = none, 1 = normal bolt, 2 = VOOC, 3 = SuperVOOC animation
     pub sup_speed: bool,
     pub battery_level: i32,
     pub voltage_mv: i32,
@@ -177,7 +179,48 @@ impl TranssionState {
             return st;
         }
 
-        // 1. Check user / runtime property override
+        // Check if connection is a PC USB port (SDP) vs Wall Charger
+        let usb_type_str = fast_read_string(NODE_CHARGER_USB_TYPE, "");
+        let charger_type_num = fast_read_int(NODE_TRAN_CHARGER_TYPE, -1);
+        let is_sdp = usb_type_str.contains("[SDP]") || charger_type_num == 0;
+
+        // Transsion Hardware Sysfs Inspection
+        let adapter_cap = fast_read_int(NODE_TRAN_ADAPTER_CAPACITY, 0);
+        let ta_pwr = fast_read_int(NODE_TRAN_TA_POWER, 0);
+        let pump_express = fast_read_int(NODE_TRAN_PUMP_EXPRESS, 0);
+        let primary_dvchg = fast_read_int(NODE_TRAN_PRIMARY_DVCHG, 0);
+        let fast_indicator = fast_read_int(NODE_TRAN_FAST_CHG, 0);
+        let vbus_mv = fast_read_int(NODE_TRAN_ADC_VBUS, 0);
+        let ibus_ma = fast_read_int(NODE_TRAN_ADC_IBUS, 0);
+
+        let chg_mode = fast_read_string(NODE_TRAN_CHARGING_MODE, "");
+        let chg_type = fast_read_string(NODE_TRAN_CHG_TYPE, "");
+
+        let is_high_voltage = vbus_mv >= 8000; // 9V, 10V, 11V, 20V
+        let is_flash_hw = primary_dvchg > 0
+            || pump_express > 0
+            || fast_indicator > 0
+            || chg_mode.contains("fast")
+            || chg_mode.contains("flash")
+            || chg_type.contains("PE")
+            || chg_type.contains("PD")
+            || chg_type.contains("PPS")
+            || chg_type.contains("FAST")
+            || chg_type.contains("UFCS");
+
+        let mut detected_w = 0;
+        if adapter_cap > 0 {
+            detected_w = adapter_cap;
+        } else if ta_pwr > 0 {
+            detected_w = ta_pwr;
+        } else if is_high_voltage && ibus_ma > 0 {
+            detected_w = ((vbus_mv as i64 * ibus_ma as i64) / 1_000_000) as i32;
+        }
+
+        let is_pc_usb = is_sdp && !is_flash_hw && !is_high_voltage && detected_w < 15;
+        st.is_pc_usb = is_pc_usb;
+
+        // Check user / runtime property override
         let prop_wattage = Self::check_property_wattage();
         if let Some(prop_w) = prop_wattage {
             st.wattage = prop_w;
@@ -186,14 +229,14 @@ impl TranssionState {
                 st.is_fast = true;
                 st.tech = 3; // SuperVOOC
                 st.fast_type = 2; // SuperVOOC 65W+
-                st.ui_icon = 2; // Glowing SuperVOOC ring
+                st.ui_icon = 3; // ColorOS SuperVOOC animation
                 st.sup_speed = true;
             } else if prop_w >= 15 {
                 st.is_supervooc = false;
                 st.is_fast = true;
                 st.tech = 2; // VOOC / Fast
                 st.fast_type = 1;
-                st.ui_icon = 1;
+                st.ui_icon = 2; // ColorOS VOOC animation
                 st.sup_speed = false;
             } else {
                 st.is_supervooc = false;
@@ -203,49 +246,25 @@ impl TranssionState {
                 st.ui_icon = 1;
                 st.sup_speed = false;
             }
+        } else if is_pc_usb {
+            // Connected to PC via USB port (Standard Downstream Port)
+            st.wattage = 5;
+            st.is_supervooc = false;
+            st.is_fast = false;
+            st.tech = 0;
+            st.fast_type = 0;
+            st.ui_icon = 1;
+            st.sup_speed = false;
         } else {
-            // 2. Transsion Hardware Sysfs Inspection
-            let adapter_cap = fast_read_int(NODE_TRAN_ADAPTER_CAPACITY, 0);
-            let ta_pwr = fast_read_int(NODE_TRAN_TA_POWER, 0);
-            let pump_express = fast_read_int(NODE_TRAN_PUMP_EXPRESS, 0);
-            let primary_dvchg = fast_read_int(NODE_TRAN_PRIMARY_DVCHG, 0);
-            let fast_indicator = fast_read_int(NODE_TRAN_FAST_CHG, 0);
-            let vbus_mv = fast_read_int(NODE_TRAN_ADC_VBUS, 0);
-            let ibus_ma = fast_read_int(NODE_TRAN_ADC_IBUS, 0);
-
-            let chg_mode = fast_read_string(NODE_TRAN_CHARGING_MODE, "");
-            let chg_type = fast_read_string(NODE_TRAN_CHG_TYPE, "");
-
-            let is_high_voltage = vbus_mv >= 8000; // 9V, 10V, 11V, 20V
-            let is_flash_hw = primary_dvchg > 0
-                || pump_express > 0
-                || fast_indicator > 0
-                || chg_mode.contains("fast")
-                || chg_mode.contains("flash")
-                || chg_type.contains("PE")
-                || chg_type.contains("PD")
-                || chg_type.contains("PPS")
-                || chg_type.contains("FAST")
-                || chg_type.contains("UFCS");
-
-            let mut detected_w = 0;
-            if adapter_cap > 0 {
-                detected_w = adapter_cap;
-            } else if ta_pwr > 0 {
-                detected_w = ta_pwr;
-            } else if is_high_voltage && ibus_ma > 0 {
-                detected_w = ((vbus_mv as i64 * ibus_ma as i64) / 1_000_000) as i32;
-            }
-
             // Classification of charging protocols:
-            // SuperVOOC: Wattage >= 30W OR charge pump active (primary_dvchg > 0)
-            if detected_w >= 30 || (primary_dvchg > 0 && detected_w >= 20) {
+            // SuperVOOC: Wattage >= 25W OR charge pump active (primary_dvchg > 0)
+            if detected_w >= 25 || (primary_dvchg > 0 && detected_w >= 18) {
                 st.wattage = if detected_w > 0 { detected_w } else { 33 };
                 st.is_supervooc = true;
                 st.is_fast = true;
                 st.tech = 3; // SuperVOOC
                 st.fast_type = 2; // SuperVOOC 65W+
-                st.ui_icon = 2;
+                st.ui_icon = 3; // ColorOS SuperVOOC animation
                 st.sup_speed = true;
             } else if detected_w >= 15 || is_flash_hw {
                 st.wattage = if detected_w > 0 { detected_w } else { 18 };
@@ -253,15 +272,15 @@ impl TranssionState {
                 st.is_fast = true;
                 st.tech = 2; // VOOC / Fast
                 st.fast_type = 1;
-                st.ui_icon = 1;
+                st.ui_icon = 2; // ColorOS VOOC animation
                 st.sup_speed = false;
             } else {
                 st.wattage = if detected_w > 0 { detected_w } else { 10 };
                 st.is_supervooc = false;
                 st.is_fast = false;
-                st.tech = 0; // Normal
+                st.tech = 0; // Normal AC
                 st.fast_type = 0;
-                st.ui_icon = 1;
+                st.ui_icon = 1; // Normal bolt
                 st.sup_speed = false;
             }
         }
@@ -298,18 +317,33 @@ impl TranssionState {
             return String::new();
         }
         let counter = DECIMAL_COUNTER.fetch_add(7, Ordering::Relaxed) % 100;
-        format!("{}.{:02}%", capacity, counter)
+        format!("{}.{:02}", capacity, counter)
     }
 
     pub fn build_update_json(&self) -> String {
+        let (ui_icon, ui_power, fast_chg, sup_speed, usb_status) = if self.online {
+            (
+                self.ui_icon,
+                if self.is_fast { self.wattage } else { 0 },
+                if self.is_fast { 1 } else { 0 },
+                if self.sup_speed { 1 } else { 0 },
+                if self.is_pc_usb { 1 } else { 2 },
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        };
+
         format!(
-            "{{\"Update\":{{\"uiIconType\":{},\"uiPower\":{},\"cpaPower\":{},\"fastCharge\":{},\"isSupportSpeedCharge\":{},\"bypassChgStatus\":{}}}}}",
-            self.ui_icon,
-            if self.is_fast { self.wattage } else { 0 },
-            if self.is_fast { self.wattage } else { 0 },
-            if self.is_fast { 1 } else { 0 },
-            if self.sup_speed { 1 } else { 0 },
-            if self.bypass_active { 1 } else { 0 }
+            "{{\"Update\":{{\"uiIconType\":{},\"uiPower\":{},\"cpaPower\":{},\"fastCharge\":{},\"isSupportSpeedCharge\":{},\"bypassChgStatus\":{},\"usbStatus\":{},\"otgOnline\":0,\"batteryRm\":{},\"batteryFcc\":{},\"shortIcOtpStatus\":0,\"shortCHwStatus\":0,\"notifyCode\":0,\"bmsStatus\":0,\"ppsCharging\":0,\"ppsChargePower\":0}}}}",
+            ui_icon,
+            ui_power,
+            ui_power,
+            fast_chg,
+            sup_speed,
+            if self.bypass_active { 1 } else { 0 },
+            usb_status,
+            self.charge_counter_mah,
+            self.charge_full_mah,
         )
     }
 
@@ -352,3 +386,4 @@ impl TranssionState {
         )
     }
 }
+
