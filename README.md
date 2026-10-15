@@ -80,17 +80,22 @@ flowchart TD
 
 ## Implemented Features
 
-### 1. SuperVOOC Animation & Dynamic Wattage
-* **Technology Trigger:** Reports `mChargerTechnology = 3` (SuperVOOC) and `mIsSupSpeedCharge = 1`.
-* **Zero 10W Glitch:** Eliminates the initial 500ms kernel negotiation fallback to 10W. Returns the actual adapter capacity immediately when charger connection is detected.
-* **Wattage Priority:**
-  1. `persist.sys.charge_wattage` or `persist.sys.rianixia.charge-wattage` (user property override).
-  2. `/sys/devices/platform/charger/adapter_capacity` (hardware negotiated wattage, e.g. 33W, 45W, 70W).
-  3. Default fallback: 33W.
+### 1. Real SuperVOOC Detection & Dynamic Wattage
+* **Accurate Protocol & Wattage Hierarchy:**
+  - **Normal / Standard Charging (SDP / CDP / 5V USB <= 10W):** Reports `mChargerTechnology = 0`, `mFastChgType = 0`, `mIsSupSpeedCharge = 0`, and `uiIconType = 1`. SuperVOOC animation is **NOT** triggered on slow USB or generic 5V chargers.
+  - **Fast Charging (15W - 27W, e.g. QC/PD/PE 18W):** Reports `mChargerTechnology = 2` (VOOC / Fast), `mFastChgType = 1`, `fastCharge = 1`, and `uiIconType = 1`.
+  - **Real SuperVOOC (>= 30W, e.g. 33W, 45W, 68W, 70W, 120W):** Triggered when hardware negotiated capacity is >= 30W or direct charge pump (`primary_dvchg`) is active. Reports `mChargerTechnology = 3`, `mFastChgType = 2`, `mIsSupSpeedCharge = 1`, and `uiIconType = 2`.
+* **Hardware Telemetry Sources:**
+  1. User property override (`persist.sys.charge_wattage` / `persist.sys.oplus.charge_wattage`).
+  2. `/sys/devices/platform/charger/adapter_capacity` (hardware negotiated adapter rating).
+  3. `/sys/class/power_supply/tran-auto-test/ta_power` (Transsion travel adapter wattage).
+  4. Real-time VBUS (`ADC_Charger_Voltage` >= 8000 mV) & charge pump (`primary_dvchg/present`).
+  5. Fallback for standard USB: clean 5V/2A (10W) or real measured power, **without** triggering fake SuperVOOC.
 
 ### 2. Lockscreen Decimal Percentage Animation
 * Implements `healthd_update_ui_soc_decimal` (code 76).
-* Computes dynamic sub-percentage steps (`level.XX%`) during active charging, triggering the smooth charging animation on ColorOS lockscreen.
+* Direct integration with Transsion fuel gauge `/sys/class/power_supply/tran-auto-test/ui_soc` for authentic hardware decimal percentage (e.g. `2955` -> `29.55%`).
+* Smooth sub-counter fallback during active SuperVOOC charging.
 
 ### 3. Bypass Charging (Direct Power Supply)
 * Bridges ColorOS Game Space / HyperBoost bypass charging toggles (`setChgConfig` flag 25) directly to `/sys/devices/platform/charger/bypass_charger`.
