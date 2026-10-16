@@ -265,9 +265,27 @@ pub struct TranssionState {
     pub limit_soc: i32,
     pub charge_counter_mah: i32,
     pub charge_full_mah: i32,
+    pub decimal_seed: i32,
+    pub decimal_rate: i32,
 }
 
+static CACHED_STATE: parking_lot::RwLock<Option<TranssionState>> =
+    parking_lot::RwLock::new(None);
+
 impl TranssionState {
+    pub fn current() -> Self {
+        if let Some(st) = CACHED_STATE.read().as_ref() {
+            return st.clone();
+        }
+        let fresh = Self::resolve();
+        *CACHED_STATE.write() = Some(fresh.clone());
+        fresh
+    }
+
+    pub fn update_cache(snapshot: Self) {
+        *CACHED_STATE.write() = Some(snapshot);
+    }
+
     fn normalize_voltage(raw: i32) -> i32 {
         if raw > 100_000 {
             raw / 1000
@@ -447,6 +465,8 @@ impl TranssionState {
         st.limit_soc = fast_read_int(NODE_TRAN_SC_TUISOC, 100);
         st.charge_counter_mah = fast_read_int(NODE_BATTERY_CHARGE_COUNTER, 2500000) / 1000;
         st.charge_full_mah = fast_read_int(NODE_BATTERY_CHARGE_FULL, 5000000) / 1000;
+        st.decimal_seed = read_int_any(UI_SOC_DECIMAL_PATHS);
+        st.decimal_rate = read_int_any(UI_SOC_DECIMAL_RATE_PATHS);
 
         st
     }
@@ -464,7 +484,13 @@ impl TranssionState {
         fast_write_int(NODE_TRAN_SC_TUISOC, val)
     }
 
-    pub fn next_decimal_soc(capacity: i32, is_charging: bool, wattage: i32) -> String {
+    pub fn next_decimal_soc(
+        capacity: i32,
+        is_charging: bool,
+        wattage: i32,
+        cached_seed: i32,
+        cached_rate: i32,
+    ) -> String {
         if !is_charging || capacity <= 0 {
             let mut state = DECIMAL_STATE.lock();
             state.capacity = -1;
@@ -479,9 +505,6 @@ impl TranssionState {
             state.target = 10000;
             return "10000,10000".to_string();
         }
-
-        let cached_seed = read_int_any(UI_SOC_DECIMAL_PATHS);
-        let cached_rate = read_int_any(UI_SOC_DECIMAL_RATE_PATHS);
 
         let mut state = DECIMAL_STATE.lock();
         let (start, end) = synthetic_decimal_soc_pair(
@@ -632,8 +655,8 @@ mod tests {
 
     #[test]
     fn test_offline_sentinel() {
-        assert_eq!(TranssionState::next_decimal_soc(50, false, 33), "0,0");
-        assert_eq!(TranssionState::next_decimal_soc(0, false, 0), "0,0");
+        assert_eq!(TranssionState::next_decimal_soc(50, false, 33, 0, 0), "0,0");
+        assert_eq!(TranssionState::next_decimal_soc(0, false, 0, 0, 0), "0,0");
     }
 
     #[test]

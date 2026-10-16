@@ -334,16 +334,18 @@ impl ICharger for ChargerService {
     }
 
     fn r#healthd_update_ui_soc_decimal(&self) -> BinderResult<String> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(TranssionState::next_decimal_soc(
             st.battery_level,
             st.online,
             st.wattage,
+            st.decimal_seed,
+            st.decimal_rate,
         ))
     }
 
     fn r#queryChargeInfo(&self) -> BinderResult<String> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.build_query_info())
     }
 
@@ -368,7 +370,7 @@ impl ICharger for ChargerService {
         _extra: &str,
         _caller_name: i32,
     ) -> BinderResult<String> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         let res = match flag {
             0 => (if st.online { st.ui_icon } else { 0 }).to_string(), // GET_UI_CHG_ICON_TYPE (3 = SuperVOOC, 2 = VOOC, 1 = Normal, 0 = None)
             1 | 2 | 3 | 4 => {
@@ -410,6 +412,7 @@ impl ICharger for ChargerService {
                 // Set charge limit target SOC (e.g. 80)
                 if let Ok(limit) = trimmed.parse::<i32>() {
                     TranssionState::set_charge_limit(limit);
+                    TranssionState::update_cache(TranssionState::resolve());
                 }
                 Ok(0)
             }
@@ -422,6 +425,7 @@ impl ICharger for ChargerService {
                     || trimmed.contains("on");
                 let target = if enable { 80 } else { 100 };
                 TranssionState::set_charge_limit(target);
+                TranssionState::update_cache(TranssionState::resolve());
                 Ok(0)
             }
             24 | 25 => {
@@ -432,6 +436,7 @@ impl ICharger for ChargerService {
                     || trimmed.contains("enable")
                     || trimmed.contains("on");
                 TranssionState::set_bypass_charging(enable);
+                TranssionState::update_cache(TranssionState::resolve());
                 Ok(0)
             }
             _ => Ok(0),
@@ -454,6 +459,21 @@ fn main() -> anyhow::Result<()> {
         "Transsion Charger HAL Bridge starting, service: {}",
         SERVICE_NAME
     );
+
+    // Initial cache population so service has valid values immediately
+    TranssionState::update_cache(TranssionState::resolve());
+
+    // Spawn background worker thread to decouple binder IPC from kernel sysfs I/O
+    std::thread::Builder::new()
+        .name("tran-chg-worker".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let snapshot = TranssionState::resolve();
+                TranssionState::update_cache(snapshot);
+            }
+        })
+        .expect("failed to spawn charger background worker");
 
     rsbinder::ProcessState::init_default().map_err(|error| {
         anyhow::anyhow!("failed to initialize Binder process state: {error}")
