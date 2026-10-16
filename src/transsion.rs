@@ -5,7 +5,6 @@
  * (Tecno Camon 30 / Helio G99 / MT6789 / Dimensity / Infinix / Itel)
  */
 
-use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const NODE_BATTERY_CAPACITY: &str = "/sys/class/power_supply/battery/capacity";
 pub const NODE_BATTERY_VOLTAGE: &str = "/sys/class/power_supply/battery/voltage_now";
@@ -38,7 +37,159 @@ pub const NODE_TRAN_BATTERY_CYCLE: &str = "/sys/devices/platform/charger/tran_ba
 pub const NODE_TRAN_SC_TUISOC: &str = "/sys/devices/platform/charger/sc_tuisoc";
 pub const NODE_TRAN_RUST_DETECT: &str = "/sys/devices/platform/charger/Rust_detect";
 
-static DECIMAL_COUNTER: AtomicU32 = AtomicU32::new(10);
+const SYNTHETIC_DECIMAL_MIN_CENTI: i32 = 5;
+const SYNTHETIC_DECIMAL_SEED_MAX_CENTI: i32 = 50;
+const SYNTHETIC_DECIMAL_MAX_CENTI: i32 = 99;
+const SYNTHETIC_DECIMAL_STEP_CENTI: i32 = 1;
+const SYNTHETIC_DECIMAL_MAX_STEP_CENTI: i32 = 3;
+
+pub const UI_SOC_DECIMAL_PATHS: &[&str] = &[
+    "/proc/ui_soc_decimal",
+    "/sys/class/power_supply/bms/soc_decimal",
+    "/sys/class/qcom-battery/soc_decimal",
+];
+
+pub const UI_SOC_DECIMAL_RATE_PATHS: &[&str] = &[
+    "/sys/class/power_supply/bms/soc_decimal_rate",
+    "/sys/class/qcom-battery/soc_decimal_rate",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecimalSocState {
+    pub capacity: i32,
+    pub target: i32,
+    pub random: u32,
+}
+
+impl Default for DecimalSocState {
+    fn default() -> Self {
+        Self {
+            capacity: -1,
+            target: 0,
+            random: 0,
+        }
+    }
+}
+
+static DECIMAL_STATE: parking_lot::Mutex<DecimalSocState> =
+    parking_lot::Mutex::new(DecimalSocState {
+        capacity: -1,
+        target: 0,
+        random: 0,
+    });
+
+impl DecimalSocState {
+    pub fn next_random(&mut self) -> u32 {
+        if self.random == 0 {
+            self.random = 0x6d2b_79f5;
+        }
+        self.random = self
+            .random
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        self.random
+    }
+}
+
+pub fn normalize_decimal_seed_offset(raw: i32, capacity: i32) -> Option<i32> {
+    if raw <= 0 {
+        return None;
+    }
+
+    let capacity = capacity.clamp(0, 100);
+    let base = capacity * 100;
+    let normalized = if raw <= 100 {
+        raw * 100
+    } else if raw <= 10000 {
+        raw
+    } else {
+        raw / 100
+    };
+    let offset = normalized - base;
+    if (SYNTHETIC_DECIMAL_MIN_CENTI..=SYNTHETIC_DECIMAL_MAX_CENTI).contains(&offset) {
+        Some(offset)
+    } else {
+        None
+    }
+}
+
+pub fn next_synthetic_decimal_seed(
+    state: &mut DecimalSocState,
+    capacity: i32,
+    cached_seed: i32,
+) -> i32 {
+    normalize_decimal_seed_offset(cached_seed, capacity).unwrap_or_else(|| {
+        SYNTHETIC_DECIMAL_MIN_CENTI
+            + (state.next_random()
+                % ((SYNTHETIC_DECIMAL_SEED_MAX_CENTI - SYNTHETIC_DECIMAL_MIN_CENTI + 1) as u32))
+                as i32
+    })
+}
+
+pub fn normalize_decimal_rate(rate: i32, wattage: i32) -> i32 {
+    if rate > 0 {
+        if rate > 10000 {
+            ((rate / 100) / 4).clamp(
+                SYNTHETIC_DECIMAL_STEP_CENTI,
+                SYNTHETIC_DECIMAL_MAX_STEP_CENTI,
+            )
+        } else {
+            (rate / 4).clamp(
+                SYNTHETIC_DECIMAL_STEP_CENTI,
+                SYNTHETIC_DECIMAL_MAX_STEP_CENTI,
+            )
+        }
+    } else if wattage >= 60 {
+        SYNTHETIC_DECIMAL_MAX_STEP_CENTI
+    } else if wattage >= 30 {
+        2
+    } else {
+        SYNTHETIC_DECIMAL_STEP_CENTI
+    }
+}
+
+pub fn synthetic_decimal_soc_pair(
+    state: &mut DecimalSocState,
+    capacity: i32,
+    cached_seed: i32,
+    cached_rate: i32,
+    wattage: i32,
+) -> (i32, i32) {
+    let capacity = capacity.clamp(0, 100);
+    if capacity >= 100 {
+        state.capacity = capacity;
+        state.target = 10000;
+        return (10000, 10000);
+    }
+
+    let base = capacity * 100;
+    let min = base + SYNTHETIC_DECIMAL_MIN_CENTI;
+    let max = base + SYNTHETIC_DECIMAL_MAX_CENTI;
+    let step = normalize_decimal_rate(cached_rate, wattage).min(max - min);
+
+    if state.capacity != capacity {
+        state.capacity = capacity;
+        state.target = base + next_synthetic_decimal_seed(state, capacity, cached_seed);
+    }
+
+    let start = state.target.clamp(min, max);
+    let seed = normalize_decimal_seed_offset(cached_seed, capacity)
+        .map(|offset| base + offset)
+        .unwrap_or(start);
+    let end = (start + step).max(seed).clamp(start, max);
+    state.target = end;
+    (start, end)
+}
+
+pub fn read_int_any(paths: &[&str]) -> i32 {
+    for path in paths {
+        let val = fast_read_int(path, -1);
+        if val >= 0 {
+            return val;
+        }
+    }
+    0
+}
 
 pub fn fast_read_int(path: &str, default_val: i32) -> i32 {
     std::fs::read_to_string(path)
@@ -313,12 +464,34 @@ impl TranssionState {
         fast_write_int(NODE_TRAN_SC_TUISOC, val)
     }
 
-    pub fn next_decimal_soc(capacity: i32, is_charging: bool) -> String {
-        if !is_charging {
-            return String::new();
+    pub fn next_decimal_soc(capacity: i32, is_charging: bool, wattage: i32) -> String {
+        if !is_charging || capacity <= 0 {
+            let mut state = DECIMAL_STATE.lock();
+            state.capacity = -1;
+            state.target = 0;
+            return "0,0".to_string();
         }
-        let counter = DECIMAL_COUNTER.fetch_add(7, Ordering::Relaxed) % 100;
-        format!("{}.{:02}", capacity, counter)
+
+        let capacity = capacity.clamp(0, 100);
+        if capacity >= 100 {
+            let mut state = DECIMAL_STATE.lock();
+            state.capacity = 100;
+            state.target = 10000;
+            return "10000,10000".to_string();
+        }
+
+        let cached_seed = read_int_any(UI_SOC_DECIMAL_PATHS);
+        let cached_rate = read_int_any(UI_SOC_DECIMAL_RATE_PATHS);
+
+        let mut state = DECIMAL_STATE.lock();
+        let (start, end) = synthetic_decimal_soc_pair(
+            &mut state,
+            capacity,
+            cached_seed,
+            cached_rate,
+            wattage,
+        );
+        format!("{},{}", start, end)
     }
 
     pub fn build_update_json(&self) -> String {
@@ -391,6 +564,83 @@ impl TranssionState {
             if self.is_supervooc { 1 } else { 0 },
             if self.bypass_active { 1 } else { 0 }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zero_percent_decimal_soc() {
+        let mut state = DecimalSocState::default();
+        let (start, end) = synthetic_decimal_soc_pair(&mut state, 0, 0, 0, 10);
+        assert!((5..=50).contains(&start));
+        assert!((5..=85).contains(&end));
+    }
+
+    #[test]
+    fn test_synthetic_decimal_progresses_without_node() {
+        let mut state = DecimalSocState::default();
+        let (first_start, first_end) = synthetic_decimal_soc_pair(&mut state, 89, 0, 0, 10);
+        let (second_start, second_end) = synthetic_decimal_soc_pair(&mut state, 89, 0, 0, 10);
+
+        assert!((8905..=8950).contains(&first_start));
+        assert!((8905..=8985).contains(&first_end));
+        assert_ne!(first_end, first_start);
+        assert_eq!(second_start, first_end);
+        assert!((8905..=8985).contains(&second_end));
+        assert_ne!(second_end, second_start);
+    }
+
+    #[test]
+    fn test_synthetic_decimal_uses_node_seed_on_reset() {
+        let mut state = DecimalSocState::default();
+        let (first_start, first_end) = synthetic_decimal_soc_pair(&mut state, 89, 8942, 0, 10);
+        let (second_start, second_end) = synthetic_decimal_soc_pair(&mut state, 89, 8901, 0, 10);
+
+        assert_eq!(first_start, 8942);
+        assert!((8905..=8985).contains(&first_end));
+        assert_ne!(first_end, first_start);
+        assert_eq!(second_start, first_end);
+        assert!((8905..=8985).contains(&second_end));
+        assert_ne!(second_end, second_start);
+    }
+
+    #[test]
+    fn test_synthetic_decimal_does_not_regress_over_many_ticks() {
+        let mut state = DecimalSocState::default();
+        let mut previous_end = 0;
+
+        for _ in 0..100 {
+            let pair = synthetic_decimal_soc_pair(&mut state, 89, 8942, 0, 10);
+            assert!((8905..=8999).contains(&pair.0));
+            assert!((8905..=8999).contains(&pair.1));
+            assert!(pair.1 >= pair.0);
+            assert!(pair.1 >= previous_end);
+            previous_end = pair.1;
+        }
+    }
+
+    #[test]
+    fn test_full_battery() {
+        let mut state = DecimalSocState::default();
+        let (start, end) = synthetic_decimal_soc_pair(&mut state, 100, 0, 0, 10);
+        assert_eq!(start, 10000);
+        assert_eq!(end, 10000);
+    }
+
+    #[test]
+    fn test_offline_sentinel() {
+        assert_eq!(TranssionState::next_decimal_soc(50, false, 33), "0,0");
+        assert_eq!(TranssionState::next_decimal_soc(0, false, 0), "0,0");
+    }
+
+    #[test]
+    fn test_rate_scaling_with_wattage() {
+        assert_eq!(normalize_decimal_rate(0, 10), 1);
+        assert_eq!(normalize_decimal_rate(0, 33), 2);
+        assert_eq!(normalize_decimal_rate(0, 68), 3);
     }
 }
 

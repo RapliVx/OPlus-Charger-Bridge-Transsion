@@ -338,6 +338,7 @@ impl ICharger for ChargerService {
         Ok(TranssionState::next_decimal_soc(
             st.battery_level,
             st.online,
+            st.wattage,
         ))
     }
 
