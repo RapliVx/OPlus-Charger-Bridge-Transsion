@@ -465,8 +465,29 @@ fn main() -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("tran-chg-worker".into())
         .spawn(|| {
+            let mut last_online = false;
+            let mut fast_poll_cycles: u32 = 0;
+
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                let current_online = TranssionState::current().online;
+
+                // When transitioning to plugged in, run high-frequency polling (50ms)
+                // for 5 seconds (100 cycles) to instantly catch voltage & wattage ramp-up
+                if current_online && !last_online {
+                    fast_poll_cycles = 100;
+                }
+                last_online = current_online;
+
+                let sleep_ms = if fast_poll_cycles > 0 {
+                    fast_poll_cycles -= 1;
+                    50
+                } else if current_online {
+                    250
+                } else {
+                    400
+                };
+
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
                 let snapshot = TranssionState::resolve();
                 TranssionState::update_cache(snapshot);
             }

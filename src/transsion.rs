@@ -36,6 +36,10 @@ pub const NODE_TRAN_HEALTH_PERCENT: &str = "/sys/devices/platform/charger/batter
 pub const NODE_TRAN_BATTERY_CYCLE: &str = "/sys/devices/platform/charger/tran_battery_cycle";
 pub const NODE_TRAN_SC_TUISOC: &str = "/sys/devices/platform/charger/sc_tuisoc";
 pub const NODE_TRAN_RUST_DETECT: &str = "/sys/devices/platform/charger/Rust_detect";
+pub const NODE_TRAN_CC1_STATUS: &str = "/sys/class/power_supply/tran-auto-test/cc1_status";
+pub const NODE_TRAN_CC2_STATUS: &str = "/sys/class/power_supply/tran-auto-test/cc2_status";
+pub const NODE_TRAN_RUN_PATH: &str = "/sys/class/power_supply/tran-auto-test/run_path";
+pub const NODE_TRAN_HIGH_VOLT_ENABLE: &str = "/sys/devices/platform/charger/High_voltage_chg_enable";
 
 const SYNTHETIC_DECIMAL_MIN_CENTI: i32 = 5;
 const SYNTHETIC_DECIMAL_SEED_MAX_CENTI: i32 = 50;
@@ -276,8 +280,14 @@ static CACHED_STATE: parking_lot::RwLock<Option<TranssionState>> =
 
 impl TranssionState {
     pub fn current() -> Self {
-        if let Some(st) = CACHED_STATE.read().as_ref() {
-            return st.clone();
+        let is_online = fast_read_int(NODE_CHARGER_ONLINE, 0) != 0;
+        {
+            let guard = CACHED_STATE.read();
+            if let Some(st) = guard.as_ref() {
+                if st.online == is_online {
+                    return st.clone();
+                }
+            }
         }
         let fresh = Self::resolve();
         *CACHED_STATE.write() = Some(fresh.clone());
@@ -379,10 +389,26 @@ impl TranssionState {
 
         let chg_mode = fast_read_string(NODE_TRAN_CHARGING_MODE, "");
 
+        // Hardware CC pin resistor comparator (Type-C 3.0A advertising for 15W - 100W+ fast chargers)
+        // Measured directly by analog PHY comparator with 0ms delay at pin contact
+        let cc1 = fast_read_string(NODE_TRAN_CC1_STATUS, "");
+        let cc2 = fast_read_string(NODE_TRAN_CC2_STATUS, "");
+        let is_typec_fast = cc1.contains("3_0") || cc2.contains("3_0");
+
+        // MediaTek Charger Type enum: 9 = FAST_CHARGER (PE / PE2.0 / PE5.0 / PD / Flash)
+        let is_fast_charger_type = charger_type_num >= 9;
+
+        // Algorithm path inspection (RFC / PumpExpress / PD handshake)
+        let run_path = fast_read_string(NODE_TRAN_RUN_PATH, "");
+        let is_pe_algo = run_path.contains("pe50") || run_path.contains("pe20") || run_path.contains("rfc_detected");
+
         let is_high_voltage = vbus_mv >= 8000; // 9V, 10V, 11V, 20V
         let is_flash_hw = primary_dvchg > 0
             || pump_express > 0
             || fast_indicator > 0
+            || is_fast_charger_type
+            || is_typec_fast
+            || is_pe_algo
             || chg_mode.contains("fast")
             || chg_mode.contains("flash")
             || chg_type.contains("PE")
@@ -394,7 +420,7 @@ impl TranssionState {
         let mut detected_w = 0;
         if adapter_cap > 0 {
             detected_w = adapter_cap;
-        } else if ta_pwr > 0 {
+        } else if ta_pwr >= 15 {
             detected_w = ta_pwr;
         } else if is_high_voltage && ibus_ma > 0 {
             detected_w = ((vbus_mv as i64 * ibus_ma as i64) / 1_000_000) as i32;
@@ -735,6 +761,27 @@ mod tests {
         let (start, end) = synthetic_decimal_soc_pair(&mut state, 37, 3705, 0, 33);
         assert_eq!(start, 3705);
         assert_eq!(end, 3707); // 33W rate step = 2
+    }
+
+    #[test]
+    fn test_slow_ac_update_json() {
+        let mut st = TranssionState::default();
+        st.online = true;
+        st.is_pc_usb = false;
+        st.is_fast = false;
+        st.is_supervooc = false;
+        st.tech = 0;
+        st.fast_type = 0;
+        st.ui_icon = 1; // Slow 10W charger gets normal single bolt
+        st.wattage = 10;
+        st.sup_speed = false;
+        st.usb_status = 0;
+
+        let json = st.build_update_json();
+        assert!(json.contains("\"uiIconType\":1"));
+        assert!(json.contains("\"uiPower\":0"));
+        assert!(json.contains("\"fastCharge\":0"));
+        assert!(json.contains("\"isSupportSpeedCharge\":0"));
     }
 }
 
