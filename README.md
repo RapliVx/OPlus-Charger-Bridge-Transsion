@@ -104,10 +104,11 @@ flowchart TD
 * **VOOC / Fast Charge (15W - 24W, e.g. QC/PD/PE 18W):**
   - Sets `uiIconType = 2` (Green VOOC double bolt icon), `mChargerTechnology = 2`, and `fastCharge = 1`.
 * **Standard AC Wall Charging (10W - 12W):**
-  - Sets `uiIconType = 1`, `mChargerTechnology = 0`, `fastCharge = 0`, and `usbStatus = 2`.
+  - Sets `uiIconType = 1`, `mChargerTechnology = 0`, `fastCharge = 0`, and `usbStatus = 0`.
 * **PC USB Port (SDP 500mA):**
   - Accurately detects `[SDP]` from `/sys/class/power_supply/charger/usb_type`.
-  - Reports `is_pc_usb = true`, `getPsyUsbOnline = 1`, `getPsyAcOnline = 0`, and `usbStatus = 1`.
+  - Reports `is_pc_usb = true`, `getPsyUsbOnline = 1`, `getPsyAcOnline = 0`, and `getAcType = 1`.
+  - Maintains `usbStatus = 0` (Clean/Dry port) to prevent false liquid/debris alerts (`charge_abnormal_alert_channel_id`, Notification ID 39). Tied to `/sys/devices/platform/charger/Rust_detect`.
 
 ### 3. Full ColorOS `Update` JSON Payload (Flag 30)
 Provides the full JSON telemetry expected by `OplusBatteryService.getDataFromHalByUpdate`:
@@ -120,7 +121,7 @@ Provides the full JSON telemetry expected by `OplusBatteryService.getDataFromHal
     "fastCharge": 1,
     "isSupportSpeedCharge": 1,
     "bypassChgStatus": 0,
-    "usbStatus": 2,
+    "usbStatus": 0,
     "otgOnline": 0,
     "batteryRm": 2500,
     "batteryFcc": 5000,
