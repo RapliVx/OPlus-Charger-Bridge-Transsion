@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
-use oplus_charger_bridge_transsion::transsion::TranssionState;
+use oplus_charger_bridge_transsion::transsion::{
+    fast_read_int, TranssionState, NODE_TRAN_RUST_DETECT,
+};
 use oplus_charger_bridge_transsion::{INTERFACE_HASH, INTERFACE_VERSION, SERVICE_NAME};
 
 include!(concat!(env!("OUT_DIR"), "/charger.rs"));
@@ -91,7 +93,6 @@ impl ICharger for ChargerService {
         getPsyPcPortOnline;
         getPsyQGVbatDeviation;
         getPsyTypeOrientation;
-        getPsyUsbStatus;
         getQgVbatDeviation;
         getSmartChgMode;
         getUsbPrimalType;
@@ -239,6 +240,11 @@ impl ICharger for ChargerService {
     fn r#getPsyUsbOnline(&self) -> BinderResult<i32> {
         let st = TranssionState::resolve();
         Ok(if st.online && st.is_pc_usb { 1 } else { 0 })
+    }
+
+    fn r#getPsyUsbStatus(&self) -> BinderResult<i32> {
+        let rust = fast_read_int(NODE_TRAN_RUST_DETECT, 0);
+        Ok(if rust > 0 { 1 } else { 0 })
     }
 
     fn r#getPsyBatteryCC(&self) -> BinderResult<i32> {

@@ -36,6 +36,7 @@ pub const NODE_TRAN_BYPASS_CHARGER: &str = "/sys/devices/platform/charger/bypass
 pub const NODE_TRAN_HEALTH_PERCENT: &str = "/sys/devices/platform/charger/battery_health_percent";
 pub const NODE_TRAN_BATTERY_CYCLE: &str = "/sys/devices/platform/charger/tran_battery_cycle";
 pub const NODE_TRAN_SC_TUISOC: &str = "/sys/devices/platform/charger/sc_tuisoc";
+pub const NODE_TRAN_RUST_DETECT: &str = "/sys/devices/platform/charger/Rust_detect";
 
 static DECIMAL_COUNTER: AtomicU32 = AtomicU32::new(10);
 
@@ -321,17 +322,23 @@ impl TranssionState {
     }
 
     pub fn build_update_json(&self) -> String {
-        let (ui_icon, ui_power, fast_chg, sup_speed, usb_status) = if self.online {
+        let (ui_icon, ui_power, fast_chg, sup_speed) = if self.online {
             (
                 self.ui_icon,
                 if self.is_fast { self.wattage } else { 0 },
                 if self.is_fast { 1 } else { 0 },
                 if self.sup_speed { 1 } else { 0 },
-                if self.is_pc_usb { 1 } else { 2 },
             )
         } else {
-            (0, 0, 0, 0, 0)
+            (0, 0, 0, 0)
         };
+
+        // In ColorOS, usbStatus is a bitmask of USB port hardware abnormality/error:
+        // Bit 0 (0x1) = HW abnormal / debris / short detected (triggers notification 39)
+        // Bit 5 (0x20) = liquid detected
+        // 0 = Normal / clean / dry (expected for all normal charging and PC USB)
+        let rust = fast_read_int(NODE_TRAN_RUST_DETECT, 0);
+        let usb_status = if rust > 0 { 1 } else { 0 };
 
         format!(
             "{{\"Update\":{{\"uiIconType\":{},\"uiPower\":{},\"cpaPower\":{},\"fastCharge\":{},\"isSupportSpeedCharge\":{},\"bypassChgStatus\":{},\"usbStatus\":{},\"otgOnline\":0,\"batteryRm\":{},\"batteryFcc\":{},\"shortIcOtpStatus\":0,\"shortCHwStatus\":0,\"notifyCode\":0,\"bmsStatus\":0,\"ppsCharging\":0,\"ppsChargePower\":0}}}}",
