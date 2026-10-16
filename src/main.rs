@@ -1,8 +1,6 @@
 #![allow(non_snake_case)]
 
-use oplus_charger_bridge_transsion::transsion::{
-    fast_read_int, TranssionState, NODE_TRAN_RUST_DETECT,
-};
+use oplus_charger_bridge_transsion::transsion::TranssionState;
 use oplus_charger_bridge_transsion::{INTERFACE_HASH, INTERFACE_VERSION, SERVICE_NAME};
 
 include!(concat!(env!("OUT_DIR"), "/charger.rs"));
@@ -181,7 +179,7 @@ impl ICharger for ChargerService {
     }
 
     fn r#getAcType(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         if !st.online {
             Ok(0)
         } else if st.is_pc_usb {
@@ -204,12 +202,12 @@ impl ICharger for ChargerService {
     }
 
     fn r#getBattPPSChgIng(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(if st.is_fast { 1 } else { 0 })
     }
 
     fn r#getBattPPSChgPower(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(if st.is_fast { st.wattage } else { 0 })
     }
 
@@ -218,97 +216,97 @@ impl ICharger for ChargerService {
     }
 
     fn r#getBattVoocChgIng(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(if st.is_supervooc { 1 } else { 0 })
     }
 
     fn r#getBatteryVoltageNow(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.voltage_mv)
     }
 
     fn r#getFastCharge(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(if st.is_fast { 1 } else { 0 })
     }
 
     fn r#getPsyAcOnline(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(if st.online && !st.is_pc_usb { 1 } else { 0 })
     }
 
     fn r#getPsyUsbOnline(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(if st.online && st.is_pc_usb { 1 } else { 0 })
     }
 
     fn r#getPsyUsbStatus(&self) -> BinderResult<i32> {
-        let rust = fast_read_int(NODE_TRAN_RUST_DETECT, 0);
-        Ok(if rust > 0 { 1 } else { 0 })
+        let st = TranssionState::current();
+        Ok(st.usb_status)
     }
 
     fn r#getPsyBatteryCC(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.charge_counter_mah)
     }
 
     fn r#getPsyBatteryCurrentNow(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.current_ma)
     }
 
     fn r#getPsyBatteryFcc(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.charge_full_mah)
     }
 
     fn r#getPsyBatteryLevel(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.battery_level)
     }
 
     fn r#getPsyBatteryPchgResetCount(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.cycle_count)
     }
 
     fn r#getPsyBatteryRm(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.charge_counter_mah)
     }
 
     fn r#getPsyBatteryStatus(&self) -> BinderResult<String> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.status)
     }
 
     fn r#getPsyBatteryTemp(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.temp_tenths)
     }
 
     fn r#getPsyChargeTech(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.tech)
     }
 
     fn r#getPsyFastChgType(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.fast_type)
     }
 
     fn r#getPsyInputCurrent(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.current_ma.abs())
     }
 
     fn r#getUsbInputCurrentNow(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.current_ma.abs())
     }
 
     fn r#getUIsohValue(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.soh)
     }
 
@@ -317,7 +315,7 @@ impl ICharger for ChargerService {
     }
 
     fn r#getWirelessCapacity(&self) -> BinderResult<i32> {
-        let st = TranssionState::resolve();
+        let st = TranssionState::current();
         Ok(st.battery_level)
     }
 

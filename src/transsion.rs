@@ -44,6 +44,7 @@ const SYNTHETIC_DECIMAL_STEP_CENTI: i32 = 1;
 const SYNTHETIC_DECIMAL_MAX_STEP_CENTI: i32 = 3;
 
 pub const UI_SOC_DECIMAL_PATHS: &[&str] = &[
+    "/sys/class/power_supply/tran-auto-test/ui_soc",
     "/proc/ui_soc_decimal",
     "/sys/class/power_supply/bms/soc_decimal",
     "/sys/class/qcom-battery/soc_decimal",
@@ -267,6 +268,7 @@ pub struct TranssionState {
     pub charge_full_mah: i32,
     pub decimal_seed: i32,
     pub decimal_rate: i32,
+    pub usb_status: i32,
 }
 
 static CACHED_STATE: parking_lot::RwLock<Option<TranssionState>> =
@@ -303,6 +305,10 @@ impl TranssionState {
     }
 
     fn resolve_cycle_count() -> i32 {
+        let tran_cyc = fast_read_int("/sys/class/power_supply/tran-auto-test/bat_cycle", -1);
+        if tran_cyc >= 0 {
+            return tran_cyc;
+        }
         let cyc = fast_read_int(NODE_TRAN_BATTERY_CYCLE, -1);
         if cyc >= 0 {
             return cyc;
@@ -352,7 +358,15 @@ impl TranssionState {
         // Check if connection is a PC USB port (SDP) vs Wall Charger
         let usb_type_str = fast_read_string(NODE_CHARGER_USB_TYPE, "");
         let charger_type_num = fast_read_int(NODE_TRAN_CHARGER_TYPE, -1);
-        let is_sdp = usb_type_str.contains("[SDP]") || charger_type_num == 0;
+        let chg_type = fast_read_string(NODE_TRAN_CHG_TYPE, "");
+
+        // SDP is strictly when usb_type has [SDP] or tran-auto-test chg_type is SDP,
+        // or charger_type_num is explicitly 1 (MTK STANDARD_HOST).
+        // NEVER treat charger_type_num == 0 as SDP (0 is CHARGER_UNKNOWN).
+        let is_sdp = usb_type_str.contains("[SDP]")
+            || chg_type == "SDP"
+            || chg_type.contains("SDP")
+            || charger_type_num == 1;
 
         // Transsion Hardware Sysfs Inspection
         let adapter_cap = fast_read_int(NODE_TRAN_ADAPTER_CAPACITY, 0);
@@ -364,7 +378,6 @@ impl TranssionState {
         let ibus_ma = fast_read_int(NODE_TRAN_ADC_IBUS, 0);
 
         let chg_mode = fast_read_string(NODE_TRAN_CHARGING_MODE, "");
-        let chg_type = fast_read_string(NODE_TRAN_CHG_TYPE, "");
 
         let is_high_voltage = vbus_mv >= 8000; // 9V, 10V, 11V, 20V
         let is_flash_hw = primary_dvchg > 0
@@ -390,33 +403,7 @@ impl TranssionState {
         let is_pc_usb = is_sdp && !is_flash_hw && !is_high_voltage && detected_w < 15;
         st.is_pc_usb = is_pc_usb;
 
-        // Check user / runtime property override
-        let prop_wattage = Self::check_property_wattage();
-        if let Some(prop_w) = prop_wattage {
-            st.wattage = prop_w;
-            if prop_w >= 30 {
-                st.is_supervooc = true;
-                st.is_fast = true;
-                st.tech = 3; // SuperVOOC
-                st.fast_type = 2; // SuperVOOC 65W+
-                st.ui_icon = 3; // ColorOS SuperVOOC animation
-                st.sup_speed = true;
-            } else if prop_w >= 15 {
-                st.is_supervooc = false;
-                st.is_fast = true;
-                st.tech = 2; // VOOC / Fast
-                st.fast_type = 1;
-                st.ui_icon = 2; // ColorOS VOOC animation
-                st.sup_speed = false;
-            } else {
-                st.is_supervooc = false;
-                st.is_fast = false;
-                st.tech = 0;
-                st.fast_type = 0;
-                st.ui_icon = 1;
-                st.sup_speed = false;
-            }
-        } else if is_pc_usb {
+        if is_pc_usb {
             // Connected to PC via USB port (Standard Downstream Port)
             st.wattage = 5;
             st.is_supervooc = false;
@@ -426,31 +413,44 @@ impl TranssionState {
             st.ui_icon = 1;
             st.sup_speed = false;
         } else {
-            // Classification of charging protocols:
-            // SuperVOOC: Wattage >= 25W OR charge pump active (primary_dvchg > 0)
-            if detected_w >= 25 || (primary_dvchg > 0 && detected_w >= 18) {
-                st.wattage = if detected_w > 0 { detected_w } else { 33 };
+            // AC Wall Charger
+            // Only trigger SuperVOOC if genuine fast charging is detected:
+            // - detected wattage >= 15W (e.g. ta_power 33W or 70W)
+            // - high voltage (>= 8V, e.g. PumpExpress 9V/11V, PD 9V/11V)
+            // - flash hardware active (primary_dvchg > 0, Pump_Express > 0, fast_chg_indicator > 0)
+            // - protocol is PE / PD / PPS / UFCS / FAST / FLASH
+            // - user set persist.sys.charge_wattage >= 15
+            let prop_wattage = Self::check_property_wattage();
+            let is_fast_detected = detected_w >= 15
+                || is_flash_hw
+                || is_high_voltage
+                || primary_dvchg > 0
+                || prop_wattage.map(|w| w >= 15).unwrap_or(false);
+
+            if is_fast_detected {
+                let resolved_w = if let Some(pw) = prop_wattage {
+                    pw
+                } else if detected_w >= 15 {
+                    detected_w
+                } else {
+                    33 // Baseline fast charge wattage on Camon 30
+                };
+
+                st.wattage = resolved_w;
                 st.is_supervooc = true;
                 st.is_fast = true;
-                st.tech = 3; // SuperVOOC
+                st.tech = 3; // SuperVOOC (required for ColorOS 17 animation & decimal trigger)
                 st.fast_type = 2; // SuperVOOC 65W+
                 st.ui_icon = 3; // ColorOS SuperVOOC animation
                 st.sup_speed = true;
-            } else if detected_w >= 15 || is_flash_hw {
-                st.wattage = if detected_w > 0 { detected_w } else { 18 };
-                st.is_supervooc = false;
-                st.is_fast = true;
-                st.tech = 2; // VOOC / Fast
-                st.fast_type = 1;
-                st.ui_icon = 2; // ColorOS VOOC animation
-                st.sup_speed = false;
             } else {
+                // Standard slow / normal AC wall charger (e.g. 5V 1A / 5V 2A 10W, normal powerbank)
                 st.wattage = if detected_w > 0 { detected_w } else { 10 };
                 st.is_supervooc = false;
                 st.is_fast = false;
                 st.tech = 0; // Normal AC
                 st.fast_type = 0;
-                st.ui_icon = 1; // Normal bolt
+                st.ui_icon = 1; // Normal single bolt
                 st.sup_speed = false;
             }
         }
@@ -467,6 +467,9 @@ impl TranssionState {
         st.charge_full_mah = fast_read_int(NODE_BATTERY_CHARGE_FULL, 5000000) / 1000;
         st.decimal_seed = read_int_any(UI_SOC_DECIMAL_PATHS);
         st.decimal_rate = read_int_any(UI_SOC_DECIMAL_RATE_PATHS);
+
+        let rust = fast_read_int(NODE_TRAN_RUST_DETECT, 0);
+        st.usb_status = if rust > 0 { 1 } else { 0 };
 
         st
     }
@@ -529,13 +532,6 @@ impl TranssionState {
             (0, 0, 0, 0)
         };
 
-        // In ColorOS, usbStatus is a bitmask of USB port hardware abnormality/error:
-        // Bit 0 (0x1) = HW abnormal / debris / short detected (triggers notification 39)
-        // Bit 5 (0x20) = liquid detected
-        // 0 = Normal / clean / dry (expected for all normal charging and PC USB)
-        let rust = fast_read_int(NODE_TRAN_RUST_DETECT, 0);
-        let usb_status = if rust > 0 { 1 } else { 0 };
-
         format!(
             "{{\"Update\":{{\"uiIconType\":{},\"uiPower\":{},\"cpaPower\":{},\"fastCharge\":{},\"isSupportSpeedCharge\":{},\"bypassChgStatus\":{},\"usbStatus\":{},\"otgOnline\":0,\"batteryRm\":{},\"batteryFcc\":{},\"shortIcOtpStatus\":0,\"shortCHwStatus\":0,\"notifyCode\":0,\"bmsStatus\":0,\"ppsCharging\":0,\"ppsChargePower\":0}}}}",
             ui_icon,
@@ -544,7 +540,7 @@ impl TranssionState {
             fast_chg,
             sup_speed,
             if self.bypass_active { 1 } else { 0 },
-            usb_status,
+            self.usb_status,
             self.charge_counter_mah,
             self.charge_full_mah,
         )
@@ -664,6 +660,81 @@ mod tests {
         assert_eq!(normalize_decimal_rate(0, 10), 1);
         assert_eq!(normalize_decimal_rate(0, 33), 2);
         assert_eq!(normalize_decimal_rate(0, 68), 3);
+    }
+
+    #[test]
+    fn test_supervooc_update_json() {
+        let mut st = TranssionState::default();
+        st.online = true;
+        st.is_fast = true;
+        st.is_supervooc = true;
+        st.tech = 3;
+        st.fast_type = 2;
+        st.ui_icon = 3;
+        st.wattage = 33;
+        st.sup_speed = true;
+        st.usb_status = 0;
+        st.charge_counter_mah = 2500;
+        st.charge_full_mah = 5000;
+
+        let json = st.build_update_json();
+        assert!(json.contains("\"uiIconType\":3"));
+        assert!(json.contains("\"uiPower\":33"));
+        assert!(json.contains("\"cpaPower\":33"));
+        assert!(json.contains("\"fastCharge\":1"));
+        assert!(json.contains("\"isSupportSpeedCharge\":1"));
+        assert!(json.contains("\"usbStatus\":0"));
+    }
+
+    #[test]
+    fn test_pc_usb_update_json() {
+        let mut st = TranssionState::default();
+        st.online = true;
+        st.is_pc_usb = true;
+        st.is_fast = false;
+        st.is_supervooc = false;
+        st.tech = 0;
+        st.fast_type = 0;
+        st.ui_icon = 1;
+        st.wattage = 5;
+        st.sup_speed = false;
+        st.usb_status = 0;
+
+        let json = st.build_update_json();
+        assert!(json.contains("\"uiIconType\":1"));
+        assert!(json.contains("\"uiPower\":0"));
+        assert!(json.contains("\"fastCharge\":0"));
+        assert!(json.contains("\"isSupportSpeedCharge\":0"));
+        assert!(json.contains("\"usbStatus\":0"));
+    }
+
+    #[test]
+    fn test_supervooc_query_info() {
+        let mut st = TranssionState::default();
+        st.online = true;
+        st.is_fast = true;
+        st.is_supervooc = true;
+        st.tech = 3;
+        st.fast_type = 2;
+        st.wattage = 33;
+
+        let info = st.build_query_info();
+        assert!(info.contains("charge_technology=3"));
+        assert!(info.contains("is_supervooc=1"));
+        assert!(info.contains("is_fast_charge=1"));
+        assert!(info.contains("adapter_power_w=33"));
+    }
+
+    #[test]
+    fn test_native_hardware_ui_soc_seed() {
+        // Device sysfs reports 3705 for 37% battery
+        let offset = normalize_decimal_seed_offset(3705, 37);
+        assert_eq!(offset, Some(5));
+
+        let mut state = DecimalSocState::default();
+        let (start, end) = synthetic_decimal_soc_pair(&mut state, 37, 3705, 0, 33);
+        assert_eq!(start, 3705);
+        assert_eq!(end, 3707); // 33W rate step = 2
     }
 }
 
