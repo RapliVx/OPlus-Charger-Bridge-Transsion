@@ -137,7 +137,8 @@ Provides the full JSON telemetry expected by `OplusBatteryService.getDataFromHal
 
 ### 4. Lockscreen Decimal Percentage Animation
 * Implements `healthd_update_ui_soc_decimal`.
-* Returns clean float string (e.g. `"18.25"`) that SystemUI parses directly without layout crashes.
+* Returns comma-separated basis points `{start},{end}` (e.g. `"5014,5022"` for 50.14% -> 50.22%).
+* ColorOS SystemUI (`com.oplus.charge.BatteryLevelToDecimalHelper`) divides these values by `100.0f` and interpolates smoothly with `ValueAnimator` over 1000ms.
 
 ### 5. Bypass Charging (Game Space Direct Power)
 * Bridges ColorOS Game Space / HyperBoost bypass charging toggles (`setChgConfig` flag 24 & 25) directly to `/sys/devices/platform/charger/bypass_charger`.
