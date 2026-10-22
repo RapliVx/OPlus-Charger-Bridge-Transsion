@@ -176,7 +176,7 @@ Provides the full JSON telemetry expected by `OplusBatteryService.getDataFromHal
 | `getUIsohValue` | SOH percentage (e.g. `100`) | `/sys/devices/platform/charger/battery_health_percent` |
 | `getDeepSleepClustersSleepWake` | String (`"0"`) | Sleep-wake cluster status (V12) |
 | `getWirelessTXEnable` | String (`"disable"`) | Wireless reverse charging guard |
-| `healthd_update_ui_soc_decimal` | String (e.g. `"18.25"`) | Real-time decimal counter |
+| `healthd_update_ui_soc_decimal` | String (e.g. `"5014,5022"`) | Real-time decimal counter (basis points) |
 | `queryChargeInfo` | Key-value formatted text | Full ColorOS telemetry contract |
 | `setChgConfig` | Handled flag & string payload | Bypass charging (24/25) & 80% limit (5/14) |
 | `getChgConfig` | String result based on flag | Flags: 0 (Icon), 1 (Watt), 6 (Speed), 24 (Bypass), 30 (JSON Update), 58 (SOH) |
