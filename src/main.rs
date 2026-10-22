@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use oplus_charger_bridge_transsion::transsion::TranssionState;
+use oplus_charger_bridge_transsion::transsion::{parse_toggle_flag, TranssionState};
 use oplus_charger_bridge_transsion::{INTERFACE_HASH, INTERFACE_VERSION, SERVICE_NAME};
 
 include!(concat!(env!("OUT_DIR"), "/charger.rs"));
@@ -252,7 +252,7 @@ impl ICharger for ChargerService {
 
     fn r#getPsyBatteryCurrentNow(&self) -> BinderResult<i32> {
         let st = TranssionState::current();
-        Ok(st.current_ma)
+        Ok(if st.online { st.current_ma.abs() } else { st.current_ma })
     }
 
     fn r#getPsyBatteryFcc(&self) -> BinderResult<i32> {
@@ -416,11 +416,7 @@ impl ICharger for ChargerService {
             }
             14 => {
                 // Toggle charge limit (80% battery protect switch)
-                let enable = trimmed.contains("switch=1")
-                    || trimmed == "1"
-                    || trimmed.contains("true")
-                    || trimmed.contains("enable")
-                    || trimmed.contains("on");
+                let enable = parse_toggle_flag(trimmed);
                 let target = if enable { 80 } else { 100 };
                 TranssionState::set_charge_limit(target);
                 TranssionState::update_cache(TranssionState::resolve());
@@ -428,11 +424,7 @@ impl ICharger for ChargerService {
             }
             24 | 25 => {
                 // Bypass charging toggle
-                let enable = trimmed.contains("switch=1")
-                    || trimmed == "1"
-                    || trimmed.contains("true")
-                    || trimmed.contains("enable")
-                    || trimmed.contains("on");
+                let enable = parse_toggle_flag(trimmed);
                 TranssionState::set_bypass_charging(enable);
                 TranssionState::update_cache(TranssionState::resolve());
                 Ok(0)
@@ -469,7 +461,8 @@ fn main() -> anyhow::Result<()> {
             let mut fast_poll_cycles: u32 = 0;
 
             loop {
-                let current_online = TranssionState::current().online;
+                let snapshot = TranssionState::resolve();
+                let current_online = snapshot.online;
 
                 // When transitioning to plugged in, run high-frequency polling (50ms)
                 // for 5 seconds (100 cycles) to instantly catch voltage & wattage ramp-up
@@ -477,6 +470,8 @@ fn main() -> anyhow::Result<()> {
                     fast_poll_cycles = 100;
                 }
                 last_online = current_online;
+
+                TranssionState::update_cache(snapshot);
 
                 let sleep_ms = if fast_poll_cycles > 0 {
                     fast_poll_cycles -= 1;
@@ -488,8 +483,6 @@ fn main() -> anyhow::Result<()> {
                 };
 
                 std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
-                let snapshot = TranssionState::resolve();
-                TranssionState::update_cache(snapshot);
             }
         })
         .expect("failed to spawn charger background worker");

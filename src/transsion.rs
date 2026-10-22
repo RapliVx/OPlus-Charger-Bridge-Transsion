@@ -196,10 +196,42 @@ pub fn read_int_any(paths: &[&str]) -> i32 {
     0
 }
 
+pub fn parse_toggle_flag(extra: &str) -> bool {
+    let trimmed = extra.trim();
+    if trimmed.contains("switch=0")
+        || trimmed == "0"
+        || trimmed.contains("false")
+        || trimmed.contains("disable")
+        || trimmed == "off"
+    {
+        return false;
+    }
+    trimmed.contains("switch=1")
+        || trimmed == "1"
+        || trimmed.contains("true")
+        || trimmed.contains("enable")
+        || trimmed == "on"
+}
+
 pub fn fast_read_int(path: &str, default_val: i32) -> i32 {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
+        .and_then(|s| {
+            let trimmed = s.trim();
+            if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+                let clean_hex: String = hex.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+                i32::from_str_radix(&clean_hex, 16).ok()
+            } else {
+                let token = trimmed.split_whitespace().next().unwrap_or(trimmed);
+                token.parse::<i32>().ok().or_else(|| {
+                    let digits: String = token
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '-')
+                        .collect();
+                    digits.parse::<i32>().ok()
+                })
+            }
+        })
         .unwrap_or(default_val)
 }
 
@@ -280,13 +312,10 @@ static CACHED_STATE: parking_lot::RwLock<Option<TranssionState>> =
 
 impl TranssionState {
     pub fn current() -> Self {
-        let is_online = fast_read_int(NODE_CHARGER_ONLINE, 0) != 0;
         {
             let guard = CACHED_STATE.read();
             if let Some(st) = guard.as_ref() {
-                if st.online == is_online {
-                    return st.clone();
-                }
+                return st.clone();
             }
         }
         let fresh = Self::resolve();
@@ -596,7 +625,7 @@ impl TranssionState {
             self.battery_level,
             self.voltage_mv,
             self.temp_tenths,
-            self.current_ma,
+            if self.online { self.current_ma.abs() } else { self.current_ma },
             self.charge_full_mah,
             self.soh,
             self.charge_counter_mah,
@@ -782,6 +811,52 @@ mod tests {
         assert!(json.contains("\"uiPower\":0"));
         assert!(json.contains("\"fastCharge\":0"));
         assert!(json.contains("\"isSupportSpeedCharge\":0"));
+    }
+
+    #[test]
+    fn test_parse_toggle_flag() {
+        assert!(parse_toggle_flag("1+switch=1"));
+        assert!(parse_toggle_flag("switch=1"));
+        assert!(parse_toggle_flag("1"));
+        assert!(parse_toggle_flag("true"));
+        assert!(parse_toggle_flag("enable"));
+        assert!(parse_toggle_flag("on"));
+        assert!(parse_toggle_flag("value=1+switch=1,reason=switch on"));
+
+        // Crucial bugfix: 'reason' contains substring 'on', must NOT evaluate to true when switch=0!
+        assert!(!parse_toggle_flag("1+switch=0"));
+        assert!(!parse_toggle_flag("switch=0"));
+        assert!(!parse_toggle_flag("0"));
+        assert!(!parse_toggle_flag("false"));
+        assert!(!parse_toggle_flag("disable"));
+        assert!(!parse_toggle_flag("off"));
+        assert!(!parse_toggle_flag("1+switch=0,reason=screen off"));
+        assert!(!parse_toggle_flag("random_invalid_string"));
+    }
+
+    #[test]
+    fn test_fast_read_int_parsing() {
+        let dir = std::env::temp_dir();
+        let path_dec = dir.join("test_fast_read_dec.txt");
+        let path_hex = dir.join("test_fast_read_hex.txt");
+        let path_txt = dir.join("test_fast_read_txt.txt");
+        let path_neg = dir.join("test_fast_read_neg.txt");
+
+        std::fs::write(&path_dec, "33\n").unwrap();
+        std::fs::write(&path_hex, "0x1f\n").unwrap();
+        std::fs::write(&path_txt, "9 (FAST_CHARGER)\n").unwrap();
+        std::fs::write(&path_neg, "-6100\n").unwrap();
+
+        assert_eq!(fast_read_int(path_dec.to_str().unwrap(), 0), 33);
+        assert_eq!(fast_read_int(path_hex.to_str().unwrap(), 0), 31);
+        assert_eq!(fast_read_int(path_txt.to_str().unwrap(), 0), 9);
+        assert_eq!(fast_read_int(path_neg.to_str().unwrap(), 0), -6100);
+        assert_eq!(fast_read_int("/non/existent/path/test.txt", -99), -99);
+
+        let _ = std::fs::remove_file(path_dec);
+        let _ = std::fs::remove_file(path_hex);
+        let _ = std::fs::remove_file(path_txt);
+        let _ = std::fs::remove_file(path_neg);
     }
 }
 
